@@ -1,0 +1,1 @@
+nodemon main.js &&.\ngrok http 8080

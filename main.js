@@ -11,20 +11,19 @@ const heatGen = require('./heatmap')
 const admin = require('firebase-admin');
 const serviceAccount = require('./serviceKey.json');
 
-var leaderboard = [];
 
-defaultHp = 100;
+const ngrok = require('ngrok');
+
 
 
 const rooms = {};
 
-app = admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+let liveLeaderboardSubscription;
 
-});
-
-
+app = admin.initializeApp({credential: admin.credential.cert(serviceAccount)});
 const db = admin.firestore()
+
+
 
 const io = require('socket.io')(server, {
 
@@ -42,7 +41,7 @@ getData = async () => {
 
 
 const listenToLeaderboardChanges = () => {
-    db.collection('games').onSnapshot((snapshot) => {
+    liveLeaderboardSubscription = db.collection('games').where('active', '==', true).onSnapshot((snapshot) => {
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'modified') {
                 const updatedDocument = change.doc.data();
@@ -53,10 +52,13 @@ const listenToLeaderboardChanges = () => {
                 if (leaderboard && gameCode) {
                     console.log(`Leaderboard updated for gameCode ${gameCode}:`, leaderboard);
                     // console.log(rooms[gameCode])
-                    rooms[gameCode].leaderboard = leaderboard;
+                    if(rooms[gameCode]){
+                        rooms[gameCode].leaderboard = leaderboard;
 
-                    // Emit the leaderboard update to the specific room associated with gameCode
-                    io.to(gameCode).emit('leadUpdate', {leaderboard: leaderboard});
+                        // Emit the leaderboard update to the specific room associated with gameCode
+                        io.to(gameCode).emit('leadUpdate', {leaderboard: leaderboard});
+                    }
+                    
                 }
             }
         });
@@ -65,7 +67,7 @@ const listenToLeaderboardChanges = () => {
 
 async function loadGamesIntoRooms() {
     try {
-        const gamesSnapshot = await admin.firestore().collection('games').get();
+        const gamesSnapshot = await admin.firestore().collection('games').where('active', '==', true).get();
 
         gamesSnapshot.forEach(gameDoc => {
             const gameData = gameDoc.data();
@@ -74,8 +76,10 @@ async function loadGamesIntoRooms() {
             rooms[gameData.gameCode] = {
                 gameCode: gameData.gameCode,
                 name: gameData.name,
-                rules: gameData.rules,
+                gameRules: gameData.gameRules,
                 leaderboard: gameData.leaderboard,
+                gameRequirements: gameData.gameRequirements,
+        
                 owner: gameData.owner,
                 heatValues: [],
                 points: []
@@ -112,46 +116,96 @@ io.on('connection', client => {
         gameObj = {
             gameCode: data.gameCode,
             name: data.name,
-            rules: data.rules,
+            active: data.active,
+            
             leaderboard: [],
             owner: data.owner,
         }
+
+        if(data.gameRules) gameObj.gameRules = data.gameRules;
+        if(data.gameRequirements) gameObj.gameRequirements = data.gameRequirements
         admin.firestore().collection('games').add(gameObj);
         gameObj.points = [];
         gameObj.heatValues = [];
-        rooms[data.gameCode] = gameObj;
 
-        listenToLeaderboardChanges(data.gameCode);
+        if(data.active == true){
+            rooms[data.gameCode] = gameObj;
+            listenToLeaderboardChanges();
+        }
+        
 
         console.log(`Game created: ${data.gameCode}`);
     })
 
+    client.on("activateGame", async (data) =>{
+        var query = await admin.firestore().collection('games')
+            .where('gameCode', '==', data.gameCode)
+            .get().then(async result => {
+                    if(!result.empty) {
+                        let snapshot = result.docs[0];
+                        const documentRef = snapshot.ref;
+                        let gameData = snapshot.data();
+                        console.log(gameData)
+                        if(gameData.active !== true){
+                            documentRef.update({'active': true})
+                            gameData.points = [];
+                            gameData.heatValues = []
+                            rooms[gameCode] = gameData;
+                            console.log(rooms[gameCode])
+                            listenToLeaderboardChanges(gameCode);
+                        }
+                    }
+                });
+            // if(game.active == false){
+            //     game.active = true
+            //     admin.firestore().collection('games').doc(data.gameCode).update(game)
+            //     game.points = [];
+            //     game.heatValues = [];
+
+            //     rooms[gameCode] = game;
+            //     listenToLeaderboardChanges(data.gameCode);
+                
+                
+            // }
+        // })
+
+    })
+
     client.on('joinGame', async (data) => {
+
         gameCode = data.gameCode;
-        client.join(gameCode);
-        console.log(`User ${uid} joined game ${gameCode}`);
-        let playerInfo = data.playerInfo;
-        const found = rooms[gameCode].leaderboard.find((item) => item.email == playerInfo.email);
-        if (!found) {
-            let newHex = generateUniqueHex(rooms[gameCode].leaderboard, 2);
-            playerInfo.gunCode = newHex;
-            playerInfo.currentScore = 0;
-            rooms[gameCode].leaderboard.push(playerInfo);
-            const querySnapshot = await db.collection('games').where('gameCode', '==', gameCode).get();
-            querySnapshot.forEach(async (doc) => {
-                await db.collection('games').doc(doc.id)
-                    .update({ 'leaderboard': rooms[gameCode].leaderboard });
-            })
+        console.log(data)
+        if(gameCode !== "" || undefined){
+            playerInfo = data.playerInfo;
+            console.log(`User ${data.playerInfo.uid} joined game ${gameCode}`);
+            console.log(rooms[gameCode])
+            if(rooms[gameCode] == undefined){
+                io.to(id).emit("noGame", {errorMsg:`No Game Running for ${gameCode}`, data});
+                return
+            }
+            const found = rooms[gameCode].leaderboard.find((item) => item.uid == playerInfo.uid);
+            let requirements = rooms[gameCode].gameRequirements;
+            console.log(requirements)
+
+            if((rooms[gameCode]) && (requirements == undefined || null)){
+                confirmedJoin(data)
+                return;
+            }
+
+            if(requirements){
+                console.log(found)
+                if(found || rooms[gameCode].owner == playerInfo.uid) confirmedJoin(data)
+                else if(playerInfo.confirmedRequirements !== true && found == undefined)io.to(id).emit("gameRequirements", {gameCode: gameCode, requirements: requirements})
+                else if((requirements.isEmail) && (playerInfo.requiredEmail == ("" || undefined))) io.to(id).emit("failedJoin", {errorMsg: "required valid Email"});
+                else if(requirements.isId && (playerInfo.requiredId == ("" || undefined))) io.to(id).emit("failedJoin", {errorMsg: "required valid Id"});
+                else if(requirements.isCustomName && (playerInfo.customName == ("" || undefined))) io.to(id).emit("failedJoin", {errorMsg: "required Custom Name"});
+                else confirmedJoin(data)
+                return
+            }
+
             
-            io.to(id).emit("connectGame", {code: gameCode, leaderboard: rooms[gameCode].leaderboard });
-            io.to(id).emit("gunCodeUpdate", newHex);
-        } else {
-            
-            io.to(id).emit("connectGame", {code: gameCode, leaderboard: rooms[gameCode].leaderboard });
-            io.to(id).emit("gunCodeUpdate", found.gunCode);
         }
-
-
+        
 
     })
 
@@ -214,6 +268,9 @@ io.on('connection', client => {
         io.to(id).emit("heatUpdate", rooms[gameCode]?.points)
 
     })
+    client.on('disconnectGame', ()=>{
+        gameCode = undefined;
+    })
     client.on('getLead', (data) => {
         io.to(id).emit("leadUpdate", { leaderboard: rooms[gameCode]?.leaderboard })
 
@@ -224,13 +281,51 @@ io.on('connection', client => {
     })
 
 
+    confirmedJoin= async (data)=>{
+        let playerInfo = data.playerInfo;
+        gameCode = data.gameCode;
+        const found = rooms[gameCode].leaderboard.find((item) => item.uid == playerInfo.uid);
+        if (!found) {
+            let newHex = generateUniqueHex(rooms[gameCode].leaderboard, 2);
+            playerInfo.gunCode = newHex;
+            playerInfo.currentScore = 0;
+            rooms[gameCode].leaderboard.push(playerInfo);
+            const querySnapshot = await db.collection('games').where('gameCode', '==', gameCode).get();
+            querySnapshot.forEach(async (doc) => {
+                await db.collection('games').doc(doc.id)
+                    .update({ 'leaderboard': rooms[gameCode].leaderboard });
+            })
+            
+            io.to(id).emit("gunCodeUpdate", newHex);
+        } else {
+            io.to(id).emit("gunCodeUpdate", found.gunCode);
+        }
+        io.to(id).emit("connectGame", {gameCode: gameCode, name: rooms[gameCode].name,leaderboard: rooms[gameCode].leaderboard, playerCount: rooms[gameCode].leaderboard.length, gameRules: rooms[gameCode].gameRules });
+
+        
+    }
+
+
 
 
 
 })
 
+ ngRun= async() =>{
+    const listener = await ngrok.connect({
+		addr: 8080,
+        authtoken: "1c8Qa8iHaf6oxkQUWrzzq4WZuYk_7P8v5SJoBtzXBn4kTLKmk"
+	});
+
+console.log(`Ingress established at: ${listener}`);
+}
+// NGROK tunnel setup
+
+
+
 server.listen(8080, () => {
-    console.log("nodejs server starts at port 3000");
+    // ngRun();
+    console.log("nodejs server starts at port 8080");
 })
 
 // Function to calculate the Haversine distance between two points in meters
