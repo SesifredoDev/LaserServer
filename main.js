@@ -20,7 +20,7 @@ const rooms = {};
 
 let liveLeaderboardSubscription;
 
-app = admin.initializeApp({credential: admin.credential.cert(serviceAccount)});
+app = admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore()
 
 
@@ -47,18 +47,17 @@ const listenToLeaderboardChanges = () => {
                 const updatedDocument = change.doc.data();
 
                 // Retrieve gameCode and leaderboard from the document
-                const { gameCode, leaderboard } = updatedDocument;
+                const { gameCode, leaderboard, players } = updatedDocument;
 
                 if (leaderboard && gameCode) {
-                    console.log(`Leaderboard updated for gameCode ${gameCode}:`, leaderboard);
+                    console.log(`Leaderboard updated for gameCode ${gameCode}:`);
                     // console.log(rooms[gameCode])
-                    if(rooms[gameCode]){
+                    if (rooms[gameCode]) {
                         rooms[gameCode].leaderboard = leaderboard;
-
                         // Emit the leaderboard update to the specific room associated with gameCode
-                        io.to(gameCode).emit('leadUpdate', {leaderboard: leaderboard});
+                        io.to(gameCode).emit('leadUpdate', { leaderboard: leaderboard });
                     }
-                    
+
                 }
             }
         });
@@ -78,8 +77,9 @@ async function loadGamesIntoRooms() {
                 name: gameData.name,
                 gameRules: gameData.gameRules,
                 leaderboard: gameData.leaderboard,
+                players: gameData.players,
                 gameRequirements: gameData.gameRequirements,
-        
+
                 owner: gameData.owner,
                 heatValues: [],
                 points: []
@@ -112,164 +112,165 @@ io.on('connection', client => {
     })
 
     client.on("createGame", (data) => {
-        console.log(data)
         gameObj = {
             gameCode: data.gameCode,
             name: data.name,
             active: data.active,
-            
+            players: [],
             leaderboard: [],
             owner: data.owner,
         }
 
-        if(data.gameRules) gameObj.gameRules = data.gameRules;
-        if(data.gameRequirements) gameObj.gameRequirements = data.gameRequirements
+        if (data.gameRules) gameObj.gameRules = data.gameRules;
+        if (data.gameRequirements) gameObj.gameRequirements = data.gameRequirements;
         admin.firestore().collection('games').add(gameObj);
         gameObj.points = [];
         gameObj.heatValues = [];
 
-        if(data.active == true){
+        if (data.active == true) {
             rooms[data.gameCode] = gameObj;
             listenToLeaderboardChanges();
         }
-        
+
 
         console.log(`Game created: ${data.gameCode}`);
     })
 
-    client.on("activateGame", async (data) =>{
+    client.on("activateGame", async (data) => {
         var query = await admin.firestore().collection('games')
             .where('gameCode', '==', data.gameCode)
             .get().then(async result => {
-                    if(!result.empty) {
-                        let snapshot = result.docs[0];
-                        const documentRef = snapshot.ref;
-                        let gameData = snapshot.data();
-                        console.log(gameData)
-                        if(gameData.active !== true){
-                            documentRef.update({'active': true})
-                            gameData.points = [];
-                            gameData.heatValues = []
-                            rooms[gameCode] = gameData;
-                            console.log(rooms[gameCode])
-                            listenToLeaderboardChanges(gameCode);
-                        }
+                if (!result.empty) {
+                    let snapshot = result.docs[0];
+                    const documentRef = snapshot.ref;
+                    let gameData = snapshot.data();
+                    if (gameData.active !== true) {
+                        documentRef.update({ 'active': true })
+                        gameData.points = [];
+                        gameData.heatValues = []
+                        rooms[gameCode] = gameData;
+                        console.log(rooms[gameCode])
+                        listenToLeaderboardChanges(gameCode);
                     }
-                });
-            // if(game.active == false){
-            //     game.active = true
-            //     admin.firestore().collection('games').doc(data.gameCode).update(game)
-            //     game.points = [];
-            //     game.heatValues = [];
+                }
+            });
+        // if(game.active == false){
+        //     game.active = true
+        //     admin.firestore().collection('games').doc(data.gameCode).update(game)
+        //     game.points = [];
+        //     game.heatValues = [];
 
-            //     rooms[gameCode] = game;
-            //     listenToLeaderboardChanges(data.gameCode);
-                
-                
-            // }
+        //     rooms[gameCode] = game;
+        //     listenToLeaderboardChanges(data.gameCode);
+
+
+        // }
         // })
 
     })
 
     client.on('joinGame', async (data) => {
-
         gameCode = data.gameCode;
-        console.log(data)
-        if(gameCode !== "" || undefined){
+        if (gameCode) {
             playerInfo = data.playerInfo;
-            console.log(`User ${data.playerInfo.uid} joined game ${gameCode}`);
-            console.log(rooms[gameCode])
-            if(rooms[gameCode] == undefined){
-                io.to(id).emit("noGame", {errorMsg:`No Game Running for ${gameCode}`, data});
-                return
-            }
-            const found = rooms[gameCode].leaderboard.find((item) => item.uid == playerInfo.uid);
-            let requirements = rooms[gameCode].gameRequirements;
-            console.log(requirements)
-
-            if((rooms[gameCode]) && (requirements == undefined || null)){
-                confirmedJoin(data)
+            if (!rooms[gameCode]) {
+                io.to(id).emit("noGame", { errorMsg: `No Game Running for ${gameCode}`, data });
                 return;
             }
-
-            if(requirements){
-                console.log(found)
-                if(found || rooms[gameCode].owner == playerInfo.uid) confirmedJoin(data)
-                else if(playerInfo.confirmedRequirements !== true && found == undefined)io.to(id).emit("gameRequirements", {gameCode: gameCode, requirements: requirements})
-                else if((requirements.isEmail) && (playerInfo.requiredEmail == ("" || undefined))) io.to(id).emit("failedJoin", {errorMsg: "required valid Email"});
-                else if(requirements.isId && (playerInfo.requiredId == ("" || undefined))) io.to(id).emit("failedJoin", {errorMsg: "required valid Id"});
-                else if(requirements.isCustomName && (playerInfo.customName == ("" || undefined))) io.to(id).emit("failedJoin", {errorMsg: "required Custom Name"});
-                else confirmedJoin(data)
-                return
+            // Check if player is already in the game or meets requirements
+            const found = rooms[gameCode].players.find((item) => item.uid == playerInfo.uid);
+            let requirements = rooms[gameCode].gameRequirements;
+    
+            if (!requirements || found || rooms[gameCode].owner == playerInfo.uid) {
+                confirmedJoin(data);
+            } else {
+                // Handle game requirements
+                if (playerInfo.confirmedRequirements !== true && !found) {
+                    io.to(id).emit("gameRequirements", { gameCode, requirements });
+                } else {
+                    confirmedJoin(data);
+                }
             }
-
-            
         }
-        
-
-    })
-
+    });
+    
 
 
-    client.on('gotshot', async function (data) {
-        let newShot = [data.data.location.latitude, data.data.location.longitude, new Date().getMilliseconds()]
+
+    client.on('gotShot', async function (data) {
+        let shotGameCode = gameCode;
+        let newShot = [data.data.location.latitude, data.data.location.longitude, new Date().getMilliseconds()];
         console.log(newShot);
+    
         var query = await admin.firestore().collection('games')
-            .where('gameCode', '==', gameCode)
+            .where('gameCode', '==', shotGameCode)
             .get().then(async result => {
-                    if(!result.empty) {
-                        let snapshot = result.docs[0];
+                if (!result.empty) {
+                    let snapshot = result.docs[0];
                     const documentRef = snapshot.ref;
                     let leaderboard = snapshot.data().leaderboard;
                     let playerIndex = leaderboard.findIndex(player => player.gunCode == data.data.id);
-                    let newScore = 100
-                    if (leaderboard[playerIndex+1]?.currentScore !== undefined) {
-                        newScore += leaderboard[playerIndex+1].currentScore;
-                    }
-
-                    leaderboard[playerIndex+1].currentScore = newScore;
-                    documentRef.update({ 'leaderboard': leaderboard });
-
-                    io.to(gameCode).emit("leadUpdate", {leaderboard: leaderboard});
-
-                    setTimeout(() => {
-
-                        rooms[gameCode].heatValues.push(newShot)
-
-                        
-                        newPoints = generateHeatMap(rooms[gameCode].heatValues);
-
-                        if (!compareArrays(rooms[gameCode].points, newPoints)) {
-                            rooms[gameCode].points = newPoints;
-                            
-                            console.log(rooms[gameCode].points, gameCode)
-                            io.to(gameCode).emit("heatUpdate", rooms[gameCode].points);
+                    if (playerIndex >= 0) {
+                        let playerDataIndex = rooms[shotGameCode].players.findIndex(player => player.gunCode == data.data.id);
+    
+                        let newScore = 100;
+                        let playerInfo = leaderboard[playerIndex];
+                        if (playerInfo) playerInfo.changeScore = newScore;
+    
+                        if (leaderboard[playerIndex]?.currentScore !== undefined) {
+                            newScore += leaderboard[playerIndex].currentScore;
                         }
-
+                        leaderboard[playerIndex].currentScore = newScore;
+    
+                        documentRef.update({ 'leaderboard': leaderboard });
+    
+                        // Emit leaderboard update to all clients in the specific room
+                        io.to(shotGameCode).emit("leadUpdate", { leaderboard: leaderboard });
+    
+                        // Send playerInfo update to the specific client connected to this player
+                        const connectedId = rooms[shotGameCode].players[playerDataIndex].connectedId;
+                        if (connectedId) {
+                            io.to(connectedId).emit("playerUpdate", playerInfo);
+                        }
+    
+                        // Handle heatmap generation and updates
                         setTimeout(() => {
-                            rooms[gameCode].heatValues = rooms[gameCode].heatValues.filter(item => item != newShot)
-                            newPoints = generateHeatMap(rooms[gameCode].heatValues);
-                            if (!compareArrays(rooms[gameCode].points, newPoints)) {
-                                rooms[gameCode].points = newPoints;
-                                io.to(gameCode).emit("heatUpdate", rooms[gameCode].points);
+                            rooms[shotGameCode].heatValues.push(newShot);
+    
+                            let newPoints = generateHeatMap(rooms[shotGameCode].heatValues);
+    
+                            if (!compareArrays(rooms[shotGameCode].points, newPoints)) {
+                                rooms[shotGameCode].points = newPoints;
+                                io.to(shotGameCode).emit("heatUpdate", rooms[shotGameCode].points);
                             }
-
-                        }, 10000)
-                    }, 10000)
+    
+                            setTimeout(() => {
+                                rooms[shotGameCode].heatValues = rooms[shotGameCode].heatValues.filter(item => item !== newShot);
+                                newPoints = generateHeatMap(rooms[shotGameCode].heatValues);
+                                if (!compareArrays(rooms[shotGameCode].points, newPoints)) {
+                                    rooms[shotGameCode].points = newPoints;
+                                    io.to(shotGameCode).emit("heatUpdate", rooms[shotGameCode].points);
+                                }
+                            }, 10000);
+                        }, 10000);
                     }
-                    
-                
+                }
             });
+    });
+    
 
-
-
-    })
     client.on('getHeat', (data) => {
         io.to(id).emit("heatUpdate", rooms[gameCode]?.points)
 
     })
-    client.on('disconnectGame', ()=>{
-        gameCode = undefined;
+    client.on('disconnectGame', () => {
+
+
+        // let playerDataIndex = rooms[gameCode].players.findIndex(player => player.uid == uid)
+        // rooms[gameCode].players[playerDataIndex].connectedId = "";
+        client.leave(gameCode);
+        gameCode = "";
+
     })
     client.on('getLead', (data) => {
         io.to(id).emit("leadUpdate", { leaderboard: rooms[gameCode]?.leaderboard })
@@ -281,29 +282,71 @@ io.on('connection', client => {
     })
 
 
-    confirmedJoin= async (data)=>{
+
+    async function confirmedJoin(data) {
         let playerInfo = data.playerInfo;
-        gameCode = data.gameCode;
-        const found = rooms[gameCode].leaderboard.find((item) => item.uid == playerInfo.uid);
+        let gameCode = data.gameCode;
+    
+        if (!rooms[gameCode]) return;
+    
+        const found = rooms[gameCode].players.find((item) => item.uid == playerInfo.uid);
         if (!found) {
             let newHex = generateUniqueHex(rooms[gameCode].leaderboard, 2);
             playerInfo.gunCode = newHex;
             playerInfo.currentScore = 0;
-            rooms[gameCode].leaderboard.push(playerInfo);
-            const querySnapshot = await db.collection('games').where('gameCode', '==', gameCode).get();
-            querySnapshot.forEach(async (doc) => {
-                await db.collection('games').doc(doc.id)
-                    .update({ 'leaderboard': rooms[gameCode].leaderboard });
-            })
-            
-            io.to(id).emit("gunCodeUpdate", newHex);
-        } else {
-            io.to(id).emit("gunCodeUpdate", found.gunCode);
-        }
-        io.to(id).emit("connectGame", {gameCode: gameCode, name: rooms[gameCode].name,leaderboard: rooms[gameCode].leaderboard, playerCount: rooms[gameCode].leaderboard.length, gameRules: rooms[gameCode].gameRules });
+    
+            let leaderboardInfo = {
+                name: playerInfo.name,
+                gunCode: playerInfo.gunCode,
+                currentScore: playerInfo.currentScore
+            };
+            if (playerInfo.customName) leaderboardInfo.name = playerInfo.customName;
+    
+            rooms[gameCode].leaderboard.push(leaderboardInfo);
+            rooms[gameCode].players.push(playerInfo);
 
-        
+            // query for game with gameCode == gameCode then push the leaderboard and players
+            admin.firestore().collection('games').where('gameCode', '==', gameCode).get().then(async result => {
+                if (!result.empty) {
+                    
+                    let snapshot = result.docs[0];
+                    const documentRef = snapshot.ref;
+                    
+                    documentRef.update({ 'leaderboard': rooms[gameCode].leaderboard, 'players': rooms[gameCode].players });
+                    
+                }
+                });
+
+    
+            io.to(client.id).emit('playerUpdate', playerInfo);
+            io.to(client.id).emit("gunCodeUpdate", newHex);
+        } else {
+            // Existing player update logic
+            let playerLeaderboardData = rooms[gameCode].leaderboard.find((item) => item.gunCode == found.gunCode);
+            playerLeaderboardData.changeScore = 0;
+    
+            io.to(client.id).emit('playerUpdate', playerLeaderboardData);
+            io.to(client.id).emit("gunCodeUpdate", found.gunCode);
+        }
+    
+        // Update connectedId for the player
+        let foundIndex = rooms[gameCode].players.findIndex((item) => item.uid == playerInfo.uid);
+        if (foundIndex !== -1) {
+            rooms[gameCode].players[foundIndex].connectedId = client.id;
+        }
+    
+        io.to(client.id).emit("connectGame", {
+            gameCode,
+            name: rooms[gameCode].name,
+            leaderboard: rooms[gameCode].leaderboard,
+            playerCount: rooms[gameCode].leaderboard.length,
+            gameRules: rooms[gameCode].gameRules,
+            isConnected: true
+        });
+        client.join(gameCode);
     }
+    
+    
 
 
 
@@ -311,13 +354,13 @@ io.on('connection', client => {
 
 })
 
- ngRun= async() =>{
+ngRun = async () => {
     const listener = await ngrok.connect({
-		addr: 8080,
+        addr: 8080,
         authtoken: "1c8Qa8iHaf6oxkQUWrzzq4WZuYk_7P8v5SJoBtzXBn4kTLKmk"
-	});
+    });
 
-console.log(`Ingress established at: ${listener}`);
+    console.log(`Ingress established at: ${listener}`);
 }
 // NGROK tunnel setup
 
